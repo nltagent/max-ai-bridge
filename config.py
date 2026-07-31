@@ -53,6 +53,11 @@ def _load_providers() -> dict[str, ProviderConfig]:
             raise RuntimeError(f"AI_PROVIDERS содержит некорректный JSON: {e}") from e
 
         for name, cfg in data.items():
+            for required in ("base_url", "default_model"):
+                if required not in cfg:
+                    raise RuntimeError(
+                        f"AI_PROVIDERS: у провайдера {name!r} не задано обязательное поле {required!r}."
+                    )
             providers[name] = ProviderConfig(
                 name=name,
                 kind=cfg.get("kind", "openai_compatible"),
@@ -62,6 +67,17 @@ def _load_providers() -> dict[str, ProviderConfig]:
             )
 
     if not providers:
+        missing = [v for v in ("AI_BASE_URL", "AI_MODEL") if v not in os.environ]
+        if missing:
+            raise RuntimeError(
+                "Не настроен ни один провайдер нейросети. Нужно одно из двух:\n"
+                "  1) переменная AI_PROVIDERS — JSON со списком провайдеров "
+                "(см. .env.example), плюс AI_DEFAULT_PROVIDER с именем одного из них; либо\n"
+                "  2) устаревший набор переменных: AI_BASE_URL и AI_MODEL "
+                "(опционально AI_KIND, AI_API_KEY).\n"
+                f"Сейчас не заданы: {', '.join(missing)}. "
+                "Если деплоите на Railway — проверьте вкладку Variables сервиса."
+            )
         providers["default"] = ProviderConfig(
             name="default",
             kind=os.environ.get("AI_KIND", "openai_compatible"),
