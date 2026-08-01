@@ -91,8 +91,20 @@ async def on_message(message: Message, client: Client) -> None:
 
     history = await storage.get_recent_history(message.chat_id, config.HISTORY_CONTEXT_TURNS)
 
+    # текущие дата и время сервера — подставляем в системный промпт автоматически,
+    # чтобы модель могла отвечать на вопросы о времени без веб-поиска
+    from datetime import datetime, timezone
+    now = datetime.now()
+    now_utc = datetime.now(timezone.utc)
+    time_line = (
+        f"Текущая дата и время сервера: {now.strftime('%d.%m.%Y %H:%M')} (локальное), "
+        f"{now_utc.strftime('%d.%m.%Y %H:%M')} UTC."
+    )
+    base_prompt = settings.system_prompt or "Ты полезный ассистент. Отвечай на том языке, на котором задан вопрос."
+    effective_system_prompt = f"{time_line}\n\n{base_prompt}"
+
     try:
-        answer = await ask(provider, model, settings.system_prompt, history, prompt, extra_context)
+        answer = await ask(provider, model, effective_system_prompt, history, prompt, extra_context)
     except httpx.HTTPStatusError as e:
         logger.error(
             "Провайдер %s (%s) вернул ошибку %s: %s",

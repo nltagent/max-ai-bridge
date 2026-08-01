@@ -75,15 +75,23 @@ async def handle(
         )
 
     if sub == "status":
+        from datetime import datetime, timezone
         s = await storage.get_settings(chat_id)
         provider_name = s.provider or await provider_registry.resolve_default(storage)
         provider = await provider_registry.get(storage, provider_name)
         model = s.model or (provider.default_model if provider else "?")
         engine = s.search_engine or config.SEARCH_ENGINE_DEFAULT
+        now = datetime.now()
+        now_utc = datetime.now(timezone.utc)
+        time_line = (
+            f"Текущая дата и время сервера: {now.strftime('%d.%m.%Y %H:%M')} (локальное), "
+            f"{now_utc.strftime('%d.%m.%Y %H:%M')} UTC."
+        )
+        base_prompt = s.system_prompt or "Ты полезный ассистент. Отвечай на том языке, на котором задан вопрос."
         return (
             f"Провайдер: {provider_name or '(не выбран — см. ' + config.COMMAND_PREFIX + ' providers)'}\n"
             f"Модель: {model}\n"
-            f"Системный промпт: {s.system_prompt or '(не задан)'}\n"
+            f"Системный промпт (как видит модель):\n{time_line}\n{base_prompt}\n"
             f"Веб-поиск: {'включён' if s.search_enabled else 'выключен'} (движок: {engine})"
         )
 
