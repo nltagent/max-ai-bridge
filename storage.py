@@ -5,11 +5,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from config import ProviderConfig
+
 
 @dataclass
 class ChatSettings:
     chat_id: int
-    provider: str
+    provider: str | None = None
     model: str | None = None
     system_prompt: str | None = None
     search_enabled: bool = False
@@ -24,9 +26,8 @@ class Storage:
     asyncio.to_thread, чтобы не блокировать event loop pymax.
     """
 
-    def __init__(self, db_path: str, default_provider: str):
+    def __init__(self, db_path: str):
         self.db_path = db_path
-        self.default_provider = default_provider
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
@@ -41,7 +42,7 @@ class Storage:
                 """
                 CREATE TABLE IF NOT EXISTS chat_settings (
                     chat_id INTEGER PRIMARY KEY,
-                    provider TEXT NOT NULL,
+                    provider TEXT,
                     model TEXT,
                     system_prompt TEXT,
                     search_enabled INTEGER NOT NULL DEFAULT 0,
@@ -61,6 +62,17 @@ class Storage:
                 """
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_history_chat ON history(chat_id, id)")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS providers (
+                    name TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    base_url TEXT NOT NULL,
+                    api_key TEXT NOT NULL,
+                    default_model TEXT NOT NULL
+                )
+                """
+            )
 
     # ---- настройки чата ----
 
@@ -71,7 +83,7 @@ class Storage:
         with closing(self._connect()) as conn:
             row = conn.execute("SELECT * FROM chat_settings WHERE chat_id = ?", (chat_id,)).fetchone()
         if row is None:
-            return ChatSettings(chat_id=chat_id, provider=self.default_provider)
+            return ChatSettings(chat_id=chat_id, provider=None)
         return ChatSettings(
             chat_id=row["chat_id"],
             provider=row["provider"],
@@ -140,3 +152,47 @@ class Storage:
     def _clear_history(self, chat_id: int) -> None:
         with closing(self._connect()) as conn, conn:
             conn.execute("DELETE FROM history WHERE chat_id = ?", (chat_id,))
+
+    # ---- провайдеры нейросетей, добавленные из чата (командой "!ai provider add") ----
+
+    async def add_provider(self, provider: ProviderConfig) -> None:
+        await asyncio.to_thread(self._add_provider, provider)
+
+    def _add_provider(self, provider: ProviderConfig) -> None:
+        with closing(self._connect()) as conn, conn:
+            conn.execute(
+                """
+                INSERT INTO providers (name, kind, base_url, api_key, default_model)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    kind=excluded.kind,
+                    base_url=excluded.base_url,
+                    api_key=excluded.api_key,
+                    default_model=excluded.default_model
+                """,
+                (provider.name, provider.kind, provider.base_url, provider.api_key, provider.default_model),
+            )
+
+    async def get_providers(self) -> dict[str, ProviderConfig]:
+        return await asyncio.to_thread(self._get_providers)
+
+    def _get_providers(self) -> dict[str, ProviderConfig]:
+        with closing(self._connect()) as conn:
+            rows = conn.execute("SELECT * FROM providers").fetchall()
+        return {
+            r["name"]: ProviderConfig(
+                name=r["name"],
+                kind=r["kind"],
+                base_url=r["base_url"],
+                api_key=r["api_key"],
+                default_model=r["default_model"],
+            )
+            for r in rows
+        }
+
+    async def delete_provider(self, name: str) -> None:
+        await asyncio.to_thread(self._delete_provider, name)
+
+    def _delete_provider(self, name: str) -> None:
+        with closing(self._connect()) as conn, conn:
+            conn.execute("DELETE FROM providers WHERE name = ?", (name,))

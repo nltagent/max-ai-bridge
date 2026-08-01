@@ -67,32 +67,28 @@ def _load_providers() -> dict[str, ProviderConfig]:
             )
 
     if not providers:
-        missing = [v for v in ("AI_BASE_URL", "AI_MODEL") if v not in os.environ]
-        if missing:
-            raise RuntimeError(
-                "Не настроен ни один провайдер нейросети. Нужно одно из двух:\n"
-                "  1) переменная AI_PROVIDERS — JSON со списком провайдеров "
-                "(см. .env.example), плюс AI_DEFAULT_PROVIDER с именем одного из них; либо\n"
-                "  2) устаревший набор переменных: AI_BASE_URL и AI_MODEL "
-                "(опционально AI_KIND, AI_API_KEY).\n"
-                f"Сейчас не заданы: {', '.join(missing)}. "
-                "Если деплоите на Railway — проверьте вкладку Variables сервиса."
+        # обе группы переменных не заданы — не ошибка: провайдеров пока просто
+        # нет, их можно будет добавить командой "!ai provider add" из чата,
+        # они сохранятся в SQLite и переживут рестарт (см. provider_registry.py)
+        if os.environ.get("AI_BASE_URL") and os.environ.get("AI_MODEL"):
+            providers["default"] = ProviderConfig(
+                name="default",
+                kind=os.environ.get("AI_KIND", "openai_compatible"),
+                base_url=os.environ["AI_BASE_URL"],
+                api_key=os.environ.get("AI_API_KEY", ""),
+                default_model=os.environ["AI_MODEL"],
             )
-        providers["default"] = ProviderConfig(
-            name="default",
-            kind=os.environ.get("AI_KIND", "openai_compatible"),
-            base_url=os.environ["AI_BASE_URL"],
-            api_key=os.environ.get("AI_API_KEY", ""),
-            default_model=os.environ["AI_MODEL"],
-        )
 
     return providers
 
 
 PROVIDERS = _load_providers()
 
-DEFAULT_PROVIDER = os.environ.get("AI_DEFAULT_PROVIDER", next(iter(PROVIDERS)))
-if DEFAULT_PROVIDER not in PROVIDERS:
+# Провайдер по умолчанию из .env — необязателен. Если не задан, а провайдеров
+# несколько или ноль, при использовании "@a" бот попросит выбрать явно
+# (см. provider_registry.resolve_default).
+DEFAULT_PROVIDER = os.environ.get("AI_DEFAULT_PROVIDER") or None
+if DEFAULT_PROVIDER and PROVIDERS and DEFAULT_PROVIDER not in PROVIDERS:
     raise RuntimeError(
         f"AI_DEFAULT_PROVIDER={DEFAULT_PROVIDER!r} не найден среди AI_PROVIDERS: {list(PROVIDERS)}"
     )
