@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import random
 from datetime import datetime, timezone
 
 import httpx
@@ -10,7 +11,7 @@ import commands
 import config
 import provider_registry
 import websearch
-from ai_providers import ask
+from ai_providers import ask_stream
 from storage import Storage
 
 logging.basicConfig(
@@ -19,49 +20,115 @@ logging.basicConfig(
 )
 logger = logging.getLogger("max-ai-bridge")
 
-# Лимит MAX на длину одного сообщения — 4000 символов.
-# Берём чуть меньше, чтобы не упираться в граничные случаи.
 MAX_MSG_LEN = 3800
+FLUSH_MIN = 2.0
+FLUSH_MAX = 3.0
 
-client = Client(phone=config.MAX_PHONE, work_dir="cache", session_name="main.db")
+client = Client(phone=config.MAX_PHONE, work_dir="cache")
 storage = Storage(config.HISTORY_DB_PATH)
 
 
+def _escape_html(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def _split_message(text: str) -> list[str]:
-    """
-    Режет текст на части не длиннее MAX_MSG_LEN.
-    Старается разбивать по абзацам/строкам, а не посередине слова.
-    """
     if len(text) <= MAX_MSG_LEN:
         return [text]
-
     parts = []
     while text:
         if len(text) <= MAX_MSG_LEN:
             parts.append(text)
             break
-        # ищем ближайший перенос строки до лимита
         cut = text.rfind("\n", 0, MAX_MSG_LEN)
         if cut <= 0:
-            # нет переноса — режем по пробелу
             cut = text.rfind(" ", 0, MAX_MSG_LEN)
         if cut <= 0:
-            # совсем нет — режем жёстко
             cut = MAX_MSG_LEN
         parts.append(text[:cut].rstrip())
         text = text[cut:].lstrip()
     return parts
 
 
-async def _send_long(message: Message, text: str) -> None:
-    """Отправляет текст, автоматически разбивая на части если длиннее лимита."""
-    parts = _split_message(text)
-    for i, part in enumerate(parts):
+async def _send_simple(message: Message, text: str) -> None:
+    """Отправить текст, разбив на части если длиннее лимита."""
+    for part in _split_message(text):
+        await message.answer(_escape_html(part))
+
+
+async def _send_streaming(message: Message, answer_chunks) -> str:
+    """
+    Стриминговая отправка через редактирование одного сообщения:
+    1. Отправляем первое сообщение как только накопился первый флаш
+    2. Каждые FLUSH_MIN..FLUSH_MAX сек редактируем то же сообщение новым текстом
+    3. Когда окно приближается к MAX_MSG_LEN — фиксируем сообщение,
+       начинаем следующее окно новым сообщением
+    Возвращает полный текст для сохранения в историю.
+    """
+    full_text = ""
+    window_text = ""
+    current_msg = None       # объект текущего сообщения окна (для edit)
+    last_flush = asyncio.get_event_loop().time()
+    flush_interval = random.uniform(FLUSH_MIN, FLUSH_MAX)
+
+    async def _flush(final: bool = False) -> None:
+        nonlocal current_msg, last_flush, flush_interval
+        if not window_text.strip():
+            return
+        escaped = _escape_html(window_text)
         try:
-            await message.answer(part)
+            if current_msg is None:
+                # первая отправка в этом окне
+                current_msg = await message.answer(escaped)
+            else:
+                # редактируем то же сообщение — пользователь видит как "набирает"
+                await current_msg.edit(escaped)
         except ApiError as e:
-            logger.error("ApiError при отправке части %d/%d: %s", i + 1, len(parts), e)
-            raise
+            logger.error("ApiError при стриминге: %s", e)
+            return
+
+        last_flush = asyncio.get_event_loop().time()
+        if not final:
+            flush_interval = random.uniform(FLUSH_MIN, FLUSH_MAX)
+
+    async for chunk in answer_chunks:
+        full_text += chunk
+        window_text += chunk
+        now = asyncio.get_event_loop().time()
+
+        # окно заполняется — фиксируем, начинаем следующее
+        if len(window_text) >= MAX_MSG_LEN - 200:
+            cut = window_text.rfind("\n\n", 0, MAX_MSG_LEN)
+            if cut <= 0:
+                cut = window_text.rfind("\n", 0, MAX_MSG_LEN)
+            if cut <= 0:
+                cut = window_text.rfind(" ", 0, MAX_MSG_LEN)
+            if cut <= 0:
+                cut = MAX_MSG_LEN
+
+            fixed_text = window_text[:cut].rstrip()
+            rest = window_text[cut:].lstrip()
+
+            # финально редактируем/отправляем зафиксированное окно
+            window_text = fixed_text
+            await _flush(final=True)
+
+            # начинаем новое окно
+            current_msg = None
+            window_text = rest
+            last_flush = asyncio.get_event_loop().time()
+            flush_interval = random.uniform(FLUSH_MIN, FLUSH_MAX)
+            continue
+
+        # периодический флаш по таймеру
+        if now - last_flush >= flush_interval:
+            await _flush(final=False)
+
+    # финальный флаш остатка
+    if window_text.strip():
+        await _flush(final=True)
+
+    return full_text
 
 
 @client.on_start()
@@ -76,14 +143,14 @@ async def on_message(message: Message, client: Client) -> None:
     try:
         await _handle(message, client)
     except ApiError as e:
-        # ApiError из pymax не должна падать наружу — иначе event loop ломается
-        # и следующие сообщения перестают обрабатываться (именно это произошло в логах)
         logger.error("ApiError в on_message (chat=%s): %s", message.chat_id, e)
     except Exception:
         logger.exception("Необработанное исключение в on_message (chat=%s)", message.chat_id)
 
 
 async def _handle(message: Message, client: Client) -> None:
+    if message.chat_id is None:
+        return
     if not message.text:
         return
     text = message.text.strip()
@@ -95,14 +162,15 @@ async def _handle(message: Message, client: Client) -> None:
             owner_id = client.me.contact.id if client.me else None
             reply = await commands.handle(
                 storage, message.chat_id, message.sender, cmd_text,
-                message=message, owner_id=owner_id,
+                send_fn=lambda t: _send_simple(message, t),
+                owner_id=owner_id,
             )
         except Exception:
             logger.exception("Ошибка при обработке команды %r в чате %s", cmd_text, message.chat_id)
-            await message.answer("⚠️ Внутренняя ошибка при обработке команды, подробности — в логах.")
+            await message.answer("⚠️ Внутренняя ошибка при обработке команды.")
             return
         if reply:
-            await _send_long(message, reply)
+            await _send_simple(message, reply)
         return
 
     # --- обычный запрос к нейросети ---
@@ -117,15 +185,14 @@ async def _handle(message: Message, client: Client) -> None:
     provider_name = settings.provider or await provider_registry.resolve_default(storage)
     if provider_name is None:
         await message.answer(
-            "⚠️ Провайдер нейросети ещё не настроен. Добавьте: "
-            f"{config.COMMAND_PREFIX} provider add <имя> <kind> <base_url> <модель> [api_key]"
+            "⚠️ Провайдер нейросети ещё не настроен. Добавьте:\n"
+            f"{config.COMMAND_PREFIX} provider add [имя] [kind] [base_url] [модель] [api_key]"
         )
         return
     provider = await provider_registry.get(storage, provider_name)
     if provider is None:
         await message.answer(
-            f"⚠️ Провайдер {provider_name!r} не найден, "
-            f"проверьте {config.COMMAND_PREFIX} providers"
+            f"⚠️ Провайдер {provider_name!r} не найден, проверьте {config.COMMAND_PREFIX} providers"
         )
         return
     model = settings.model or provider.default_model
@@ -143,11 +210,10 @@ async def _handle(message: Message, client: Client) -> None:
             )
             extra_context = websearch.format_results(results)
         except Exception:
-            logger.warning("Веб-поиск (%s) не удался, отвечаем без него", engine, exc_info=True)
+            logger.warning("Веб-поиск (%s) не удался", engine, exc_info=True)
 
     history = await storage.get_recent_history(message.chat_id, config.HISTORY_CONTEXT_TURNS)
 
-    # дата/время сервера — в системный промпт, чтобы модель отвечала без поиска
     now = datetime.now()
     now_utc = datetime.now(timezone.utc)
     time_line = (
@@ -161,22 +227,25 @@ async def _handle(message: Message, client: Client) -> None:
     effective_system_prompt = f"{time_line}\n\n{base_prompt}"
 
     try:
-        answer = await ask(provider, model, effective_system_prompt, history, prompt, extra_context)
+        answer_gen = ask_stream(
+            provider, model, effective_system_prompt, history, prompt, extra_context
+        )
+        full_answer = await _send_streaming(message, answer_gen)
     except httpx.HTTPStatusError as e:
         logger.error(
-            "Провайдер %s (%s) вернул ошибку %s: %s",
-            provider.name, model, e.response.status_code, e.response.text[:500],
+            "Провайдер %s (%s) вернул ошибку %s",
+            provider.name, model, e.response.status_code,
         )
         await message.answer(f"⚠️ Нейросеть вернула ошибку {e.response.status_code}")
         return
     except Exception:
         logger.exception("Не удалось получить ответ от провайдера %s (%s)", provider.name, model)
-        await message.answer("⚠️ Не удалось получить ответ от нейросети, попробуйте ещё раз.")
+        await message.answer("⚠️ Не удалось получить ответ от нейросети.")
         return
 
-    await storage.add_message(message.chat_id, "user", prompt)
-    await storage.add_message(message.chat_id, "assistant", answer)
-    await _send_long(message, answer)
+    if full_answer:
+        await storage.add_message(message.chat_id, "user", prompt)
+        await storage.add_message(message.chat_id, "assistant", full_answer)
 
 
 async def main() -> None:
