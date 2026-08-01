@@ -1,3 +1,5 @@
+from pymax import File
+
 import config
 import provider_registry
 import shell_exec
@@ -10,6 +12,7 @@ from storage import Storage
 # Причина: текст может пересылаться через Telegram Bot API с parse_mode="HTML",
 # где угловые скобки интерпретируются как HTML-теги и вызывают ошибку:
 # "Unsupported start tag <имя>".
+# Это касается HELP_TEXT и всех f-строк с подсказками по использованию команд ниже.
 HELP_TEXT = (
     "Команды бота:\n"
     f"{config.COMMAND_PREFIX} id — узнать свой ID (для ADMIN_IDS в .env)\n"
@@ -31,14 +34,28 @@ HELP_TEXT = (
 
 def is_admin(sender_id: int | None) -> bool:
     if not config.ADMIN_IDS:
-        return True
+        return True  # ADMIN_IDS не задан в .env — ограничений нет, см. README
     return sender_id in config.ADMIN_IDS
 
 
 def is_strict_admin(sender_id: int | None, owner_id: int | None) -> bool:
     if config.ADMIN_IDS:
         return sender_id in config.ADMIN_IDS
+    # ADMIN_IDS ещё не задан в .env — режим первичной настройки: доверяем
+    # только владельцу аккаунта, на котором запущен бот (это тот же человек,
+    # кто позже впишет свой ID в ADMIN_IDS), но не всем подряд, как в is_admin.
     return owner_id is not None and sender_id == owner_id
+
+
+async def _try_delete_message(message) -> str:
+    """Пытается удалить исходное сообщение (в нём мог быть API-ключ)."""
+    if message is None:
+        return ""
+    try:
+        await message.delete(for_me=False)
+        return " Исходное сообщение с ключом удалено из чата."
+    except Exception:
+        return " ⚠️ Не удалось автоматически удалить сообщение с ключом — удалите вручную."
 
 
 async def handle(
@@ -46,7 +63,7 @@ async def handle(
     chat_id: int,
     sender_id: int | None,
     text: str,
-    send_fn=None,       # async callable(text: str) — для отправки файлов/доп. сообщений
+    message=None,
     owner_id: int | None = None,
 ) -> str | None:
     parts = text.strip().split(maxsplit=1)
@@ -84,6 +101,8 @@ async def handle(
             f"Веб-поиск: {'включён' if s.search_enabled else 'выключен'} (движок: {engine})"
         )
 
+    # выполнение shell-команд в контейнере — своя, отдельная и более строгая
+    # проверка прав, не связанная с общим is_admin() ниже (см. README)
     if sub == "sh":
         if not config.SHELL_EXEC_ENABLED:
             return "⛔ Выполнение команд в контейнере отключено (SHELL_EXEC_ENABLED=false в .env)"
@@ -96,19 +115,18 @@ async def handle(
         except Exception as e:
             return f"⚠️ Ошибка выполнения: {e}"
 
-        if not result.truncated or send_fn is None:
+        if not result.truncated or message is None:
             return result.display_text
 
-        # вывод не влез — сначала обрезанный текст, потом полный файлом
-        # В v2.3.1 отправка файлов через client.send_file() — пока присылаем
-        # полный вывод вторым текстовым сообщением (разбитым по частям если надо)
-        await send_fn(result.display_text)
-        # отправляем остаток полного вывода если он отличается
-        full_tail = result.full_output[len(result.display_text):]
-        if full_tail.strip():
-            await send_fn("(продолжение)\n" + full_tail)
+        # вывод не влез в сообщение — отдельно прикладываем файлом полный текст
+        await message.answer(
+            result.display_text,
+            attachments=[File(raw=result.full_output.encode("utf-8"), name="output.txt")],
+        )
         return None
 
+    # "provider add"/"provider remove" — свой, отдельный и более строгий гейт,
+    # т.к. они добавляют/удаляют API-ключ, а не просто переключают настройку
     if sub == "provider":
         action, _, arg = rest.partition(" ")
         action = action.lower()
@@ -130,10 +148,8 @@ async def handle(
             await storage.add_provider(
                 ProviderConfig(name=name, kind=kind, base_url=base_url, api_key=api_key, default_model=model)
             )
-            return (
-                f"✅ Провайдер {name!r} добавлен. Переключить: {config.COMMAND_PREFIX} provider {name}.\n"
-                f"⚠️ Удалите сообщение с API-ключом из чата вручную."
-            )
+            note = await _try_delete_message(message)
+            return f"✅ Провайдер {name!r} добавлен. Переключить: {config.COMMAND_PREFIX} provider {name}.{note}"
 
         if action == "remove":
             if not is_strict_admin(sender_id, owner_id):
@@ -143,6 +159,7 @@ async def handle(
             await storage.delete_provider(arg.strip())
             return f"✅ Провайдер {arg.strip()!r} удалён из базы (провайдеры из .env этим не затрагиваются)"
 
+        # иначе — обычное переключение провайдера для чата, под общим is_admin()
         if not is_admin(sender_id):
             return "⛔ Эта команда доступна только владельцу бота."
         name = rest.strip()
@@ -153,10 +170,11 @@ async def handle(
             return f"Неизвестный провайдер {name!r}. Доступные: {', '.join(providers)}"
         s = await storage.get_settings(chat_id)
         s.provider = name
-        s.model = None
+        s.model = None  # сбрасываем модель на дефолтную для нового провайдера
         await storage.save_settings(s)
         return f"✅ Провайдер для этого чата: {name}"
 
+    # команды ниже меняют настройки бота — доступны только админам (если ADMIN_IDS задан)
     if not is_admin(sender_id):
         return "⛔ Эта команда доступна только владельцу бота."
 
@@ -215,7 +233,8 @@ async def handle(
             return f"Поиск не настроен. Сначала выберите движок: {config.COMMAND_PREFIX} engine searxng|keenable"
         try:
             results = await websearch.search(
-                engine, rest,
+                engine,
+                rest,
                 searxng_url=config.SEARXNG_URL,
                 keenable_api_key=config.KEENABLE_API_KEY,
                 max_results=config.SEARCH_MAX_RESULTS,
