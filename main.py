@@ -11,7 +11,7 @@ import commands
 import config
 import provider_registry
 import websearch
-from ai_providers import ask_stream
+from ai_providers import ask, ask_stream
 from storage import Storage
 
 logging.basicConfig(
@@ -221,10 +221,16 @@ async def _handle(message: Message, client: Client) -> None:
     effective_system_prompt = f"{time_line}\n\n{base_prompt}"
 
     try:
-        answer_gen = ask_stream(
-            provider, model, effective_system_prompt, history, prompt, extra_context
-        )
-        full_answer = await _send_streaming(message, answer_gen)
+        if settings.stream_enabled:
+            answer_gen = ask_stream(
+                provider, model, effective_system_prompt, history, prompt, extra_context
+            )
+            full_answer = await _send_streaming(message, answer_gen)
+        else:
+            full_answer = await ask(
+                provider, model, effective_system_prompt, history, prompt, extra_context
+            )
+            await _send_long(message, full_answer)
     except httpx.HTTPStatusError as e:
         logger.error(
             "Провайдер %s (%s) вернул ошибку %s: %s",

@@ -16,6 +16,7 @@ class ChatSettings:
     system_prompt: str | None = None
     search_enabled: bool = False
     search_engine: str | None = None
+    stream_enabled: bool = False   # стриминг выкл. по умолчанию
 
 
 class Storage:
@@ -46,10 +47,16 @@ class Storage:
                     model TEXT,
                     system_prompt TEXT,
                     search_enabled INTEGER NOT NULL DEFAULT 0,
-                    search_engine TEXT
+                    search_engine TEXT,
+                    stream_enabled INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
+            # миграция для существующих БД — добавляем колонку если её ещё нет
+            try:
+                conn.execute("ALTER TABLE chat_settings ADD COLUMN stream_enabled INTEGER NOT NULL DEFAULT 0")
+            except Exception:
+                pass  # колонка уже есть
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS history (
@@ -91,6 +98,7 @@ class Storage:
             system_prompt=row["system_prompt"],
             search_enabled=bool(row["search_enabled"]),
             search_engine=row["search_engine"],
+            stream_enabled=bool(row["stream_enabled"]),
         )
 
     async def save_settings(self, settings: ChatSettings) -> None:
@@ -100,14 +108,15 @@ class Storage:
         with closing(self._connect()) as conn, conn:
             conn.execute(
                 """
-                INSERT INTO chat_settings (chat_id, provider, model, system_prompt, search_enabled, search_engine)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO chat_settings (chat_id, provider, model, system_prompt, search_enabled, search_engine, stream_enabled)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(chat_id) DO UPDATE SET
                     provider=excluded.provider,
                     model=excluded.model,
                     system_prompt=excluded.system_prompt,
                     search_enabled=excluded.search_enabled,
-                    search_engine=excluded.search_engine
+                    search_engine=excluded.search_engine,
+                    stream_enabled=excluded.stream_enabled
                 """,
                 (
                     settings.chat_id,
@@ -116,6 +125,7 @@ class Storage:
                     settings.system_prompt,
                     int(settings.search_enabled),
                     settings.search_engine,
+                    int(settings.stream_enabled),
                 ),
             )
 

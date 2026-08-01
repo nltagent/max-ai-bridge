@@ -25,6 +25,7 @@ HELP_TEXT = (
     f"{config.COMMAND_PREFIX} system [текст] — задать системный промпт для этого чата\n"
     f"{config.COMMAND_PREFIX} system clear — сбросить системный промпт\n"
     f"{config.COMMAND_PREFIX} search on|off — вкл/выкл автодополнение ответов веб-поиском\n"
+    f"{config.COMMAND_PREFIX} stream on|off — вкл/выкл стриминг (по умолчанию выкл)\n"
     f"{config.COMMAND_PREFIX} engine searxng|keenable — выбрать поисковый движок для этого чата\n"
     f"{config.COMMAND_PREFIX} find [запрос] — разовый веб-поиск (без обращения к нейросети)\n"
     f"{config.COMMAND_PREFIX} history [n] — последние n обменов (по умолчанию 5)\n"
@@ -98,7 +99,8 @@ async def handle(
             f"Провайдер: {provider_name or '(не выбран — см. ' + config.COMMAND_PREFIX + ' providers)'}\n"
             f"Модель: {model}\n"
             f"Системный промпт (как видит модель):\n{time_line}\n{base_prompt}\n"
-            f"Веб-поиск: {'включён' if s.search_enabled else 'выключен'} (движок: {engine})"
+            f"Веб-поиск: {'включён' if s.search_enabled else 'выключен'} (движок: {engine})\n"
+            f"Стриминг: {'включён' if s.stream_enabled else 'выключен'}"
         )
 
     # выполнение shell-команд в контейнере — своя, отдельная и более строгая
@@ -215,6 +217,14 @@ async def handle(
         s.search_enabled = rest.lower() in ("on", "вкл")
         await storage.save_settings(s)
         return f"✅ Веб-поиск {'включён' if s.search_enabled else 'выключен'} для этого чата"
+
+    if sub == "stream":
+        if rest.lower() not in ("on", "off", "вкл", "выкл"):
+            return f"Использование: {config.COMMAND_PREFIX} stream on|off"
+        s = await storage.get_settings(chat_id)
+        s.stream_enabled = rest.lower() in ("on", "вкл")
+        await storage.save_settings(s)
+        return f"✅ Стриминг {'включён' if s.stream_enabled else 'выключен'} для этого чата"
 
     if sub == "engine":
         if rest not in ("searxng", "keenable"):
