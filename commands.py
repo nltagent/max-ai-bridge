@@ -7,20 +7,26 @@ import websearch
 from config import ProviderConfig
 from storage import Storage
 
+# ВАЖНО: в пользовательских строках этого файла использовать ТОЛЬКО квадратные скобки []
+# для обозначения аргументов команд, НЕ угловые <>.
+# Причина: текст может пересылаться через Telegram Bot API с parse_mode="HTML",
+# где угловые скобки интерпретируются как HTML-теги и вызывают ошибку:
+# "Unsupported start tag <имя>".
+# Это касается HELP_TEXT и всех f-строк с подсказками по использованию команд ниже.
 HELP_TEXT = (
     "Команды бота:\n"
     f"{config.COMMAND_PREFIX} id — узнать свой ID (для ADMIN_IDS в .env)\n"
     f"{config.COMMAND_PREFIX} status — текущие настройки этого чата\n"
     f"{config.COMMAND_PREFIX} providers — список доступных провайдеров/агрегаторов\n"
-    f"{config.COMMAND_PREFIX} provider <имя> — сменить провайдера для этого чата\n"
-    f"{config.COMMAND_PREFIX} provider add <имя> <kind> <base_url> <модель> [api_key] — добавить провайдера\n"
-    f"{config.COMMAND_PREFIX} provider remove <имя> — удалить провайдера, добавленного из чата\n"
-    f"{config.COMMAND_PREFIX} model <модель> — сменить модель для этого чата\n"
-    f"{config.COMMAND_PREFIX} system <текст> — задать системный промпт для этого чата\n"
+    f"{config.COMMAND_PREFIX} provider [имя] — сменить провайдера для этого чата\n"
+    f"{config.COMMAND_PREFIX} provider add [имя] [kind] [base_url] [модель] [api_key] — добавить провайдера\n"
+    f"{config.COMMAND_PREFIX} provider remove [имя] — удалить провайдера, добавленного из чата\n"
+    f"{config.COMMAND_PREFIX} model [модель] — сменить модель для этого чата\n"
+    f"{config.COMMAND_PREFIX} system [текст] — задать системный промпт для этого чата\n"
     f"{config.COMMAND_PREFIX} system clear — сбросить системный промпт\n"
     f"{config.COMMAND_PREFIX} search on|off — вкл/выкл автодополнение ответов веб-поиском\n"
     f"{config.COMMAND_PREFIX} engine searxng|keenable — выбрать поисковый движок для этого чата\n"
-    f"{config.COMMAND_PREFIX} find <запрос> — разовый веб-поиск (без обращения к нейросети)\n"
+    f"{config.COMMAND_PREFIX} find [запрос] — разовый веб-поиск (без обращения к нейросети)\n"
     f"{config.COMMAND_PREFIX} history [n] — последние n обменов (по умолчанию 5)\n"
     f"{config.COMMAND_PREFIX} reset — очистить сохранённую историю переписки с ИИ в этом чате\n"
 )
@@ -103,7 +109,7 @@ async def handle(
         if not is_strict_admin(sender_id, owner_id):
             return "⛔ Эта команда доступна только пользователям, явно перечисленным в ADMIN_IDS"
         if not rest:
-            return f"Использование: {config.COMMAND_PREFIX} sh <команда>"
+            return f"Использование: {config.COMMAND_PREFIX} sh [команда]"
         try:
             result = await shell_exec.run(rest, config.SHELL_EXEC_TIMEOUT)
         except Exception as e:
@@ -132,7 +138,7 @@ async def handle(
             if len(tokens) < 4:
                 return (
                     f"Использование: {config.COMMAND_PREFIX} provider add "
-                    f"<имя> <kind> <base_url> <модель> [api_key]\n"
+                    f"[имя] [kind] [base_url] [модель] [api_key]\n"
                     f"kind: openai_compatible | gemini"
                 )
             name, kind, base_url, model = tokens[:4]
@@ -149,7 +155,7 @@ async def handle(
             if not is_strict_admin(sender_id, owner_id):
                 return "⛔ Удаление провайдера доступно только пользователям, явно перечисленным в ADMIN_IDS"
             if not arg:
-                return f"Использование: {config.COMMAND_PREFIX} provider remove <имя>"
+                return f"Использование: {config.COMMAND_PREFIX} provider remove [имя]"
             await storage.delete_provider(arg.strip())
             return f"✅ Провайдер {arg.strip()!r} удалён из базы (провайдеры из .env этим не затрагиваются)"
 
@@ -159,7 +165,7 @@ async def handle(
         name = rest.strip()
         providers = await provider_registry.all_providers(storage)
         if not providers:
-            return f"Провайдеров пока нет. Добавьте: {config.COMMAND_PREFIX} provider add <имя> <kind> <base_url> <модель> [api_key]"
+            return f"Провайдеров пока нет. Добавьте: {config.COMMAND_PREFIX} provider add [имя] [kind] [base_url] [модель] [api_key]"
         if name not in providers:
             return f"Неизвестный провайдер {name!r}. Доступные: {', '.join(providers)}"
         s = await storage.get_settings(chat_id)
@@ -177,14 +183,14 @@ async def handle(
         if not providers:
             return (
                 f"Провайдеров пока нет. Добавьте: {config.COMMAND_PREFIX} provider add "
-                f"<имя> <kind> <base_url> <модель> [api_key]"
+                f"[имя] [kind] [base_url] [модель] [api_key]"
             )
         lines = [f"- {name} ({p.kind}, модель по умолчанию: {p.default_model})" for name, p in providers.items()]
         return "Доступные провайдеры/агрегаторы:\n" + "\n".join(lines)
 
     if sub == "model":
         if not rest:
-            return f"Использование: {config.COMMAND_PREFIX} model <название>"
+            return f"Использование: {config.COMMAND_PREFIX} model [название]"
         s = await storage.get_settings(chat_id)
         s.model = rest
         await storage.save_settings(s)
@@ -197,7 +203,7 @@ async def handle(
             await storage.save_settings(s)
             return "✅ Системный промпт сброшен"
         if not rest:
-            return f"Использование: {config.COMMAND_PREFIX} system <текст> | {config.COMMAND_PREFIX} system clear"
+            return f"Использование: {config.COMMAND_PREFIX} system [текст] | {config.COMMAND_PREFIX} system clear"
         s.system_prompt = rest
         await storage.save_settings(s)
         return "✅ Системный промпт обновлён"
@@ -220,7 +226,7 @@ async def handle(
 
     if sub == "find":
         if not rest:
-            return f"Использование: {config.COMMAND_PREFIX} find <запрос>"
+            return f"Использование: {config.COMMAND_PREFIX} find [запрос]"
         s = await storage.get_settings(chat_id)
         engine = s.search_engine or config.SEARCH_ENGINE_DEFAULT
         if engine == "none":
