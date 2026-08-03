@@ -12,6 +12,7 @@ import config
 import provider_registry
 import websearch
 from ai_providers import ask, ask_stream
+from session import restore as restore_session
 from storage import Storage
 
 logging.basicConfig(
@@ -24,19 +25,22 @@ MAX_MSG_LEN = 3800
 FLUSH_MIN = 2.0
 FLUSH_MAX = 3.0
 
-# session_name="main.db" — критично: именно этот параметр обеспечивал
-# работу сессии на Railway. Не менять.
+# Восстанавливаем сессию MAX из переменной окружения ДО инициализации клиента.
+# Если MAX_SESSION не задана — pymax запросит SMS-код как обычно.
+if restore_session():
+    logger.info("Сессия MAX восстановлена из переменной окружения MAX_SESSION")
+else:
+    logger.warning("MAX_SESSION не задана — потребуется авторизация через SMS")
+
 client = Client(phone=config.MAX_PHONE, work_dir="cache", session_name="main.db")
-storage = Storage(config.HISTORY_DB_PATH)
+storage = Storage()
 
 
 def _escape_html(text: str) -> str:
-    """Экранирует HTML-спецсимволы — защита от падений при пересылке в Telegram."""
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _split_message(text: str) -> list[str]:
-    """Режет текст на части ≤ MAX_MSG_LEN, стараясь не рвать посередине слова."""
     if len(text) <= MAX_MSG_LEN:
         return [text]
     parts = []
@@ -55,7 +59,6 @@ def _split_message(text: str) -> list[str]:
 
 
 async def _send_long(message: Message, text: str) -> None:
-    """Отправляет текст частями с экранированием HTML."""
     for i, part in enumerate(_split_message(text)):
         try:
             await message.answer(_escape_html(part))
@@ -65,13 +68,6 @@ async def _send_long(message: Message, text: str) -> None:
 
 
 async def _send_streaming(message: Message, answer_chunks) -> str:
-    """
-    Стриминговая отправка через редактирование одного сообщения:
-    - первый флаш → message.answer() → получаем объект для edit()
-    - каждые FLUSH_MIN..FLUSH_MAX сек → current_msg.edit(накопленный текст)
-    - при достижении ~MAX_MSG_LEN → фиксируем, начинаем новое сообщение
-    Возвращает полный текст для истории (без HTML-экранирования).
-    """
     full_text = ""
     window_text = ""
     current_msg = None
@@ -100,7 +96,6 @@ async def _send_streaming(message: Message, answer_chunks) -> str:
         window_text += chunk
         now = asyncio.get_event_loop().time()
 
-        # окно заполнилось — фиксируем, начинаем следующее
         if len(window_text) >= MAX_MSG_LEN - 200:
             cut = window_text.rfind("\n\n", 0, MAX_MSG_LEN)
             if cut <= 0:
@@ -129,6 +124,9 @@ async def _send_streaming(message: Message, answer_chunks) -> str:
 
 @client.on_start()
 async def on_start(client: Client) -> None:
+    # Инициализируем таблицы в Turso при каждом старте (CREATE IF NOT EXISTS — безопасно)
+    await storage.init_db()
+    logger.info("Turso: таблицы проверены/созданы")
     logger.info("MAX-клиент запущен, жду сообщений с префиксом: %s", config.TRIGGER_PREFIX)
     logger.info("Команды настроек начинаются с: %s", config.COMMAND_PREFIX)
     logger.info("Ваш ID: %s", client.me.contact.id if client.me else "unknown")
@@ -149,11 +147,16 @@ async def _handle(message: Message, client: Client) -> None:
         return
     text = message.text.strip()
 
-    # --- команды управления ботом ---
     if text.startswith(config.COMMAND_PREFIX):
         cmd_text = text[len(config.COMMAND_PREFIX):].strip()
         try:
             owner_id = client.me.contact.id if client.me else None
+            logger.info(
+                "CMD chat_id=%r (type=%s) sender=%r (type=%s) owner_id=%r cmd=%r",
+                message.chat_id, type(message.chat_id).__name__,
+                message.sender, type(message.sender).__name__,
+                owner_id, cmd_text,
+            )
             reply = await commands.handle(
                 storage, message.chat_id, message.sender, cmd_text,
                 message=message, owner_id=owner_id,
@@ -166,7 +169,6 @@ async def _handle(message: Message, client: Client) -> None:
             await _send_long(message, reply)
         return
 
-    # --- обычный запрос к нейросети ---
     if not text.startswith(config.TRIGGER_PREFIX):
         return
 
@@ -191,7 +193,6 @@ async def _handle(message: Message, client: Client) -> None:
         return
     model = settings.model or provider.default_model
 
-    # опциональный веб-поиск
     extra_context = None
     engine = settings.search_engine or config.SEARCH_ENGINE_DEFAULT
     if settings.search_enabled and engine != "none":
@@ -249,7 +250,10 @@ async def _handle(message: Message, client: Client) -> None:
 
 
 async def main() -> None:
-    await client.start()
+    try:
+        await client.start()
+    finally:
+        await storage.close()
 
 
 if __name__ == "__main__":

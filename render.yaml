@@ -1,0 +1,28 @@
+services:
+  - type: worker          # worker — не web-сервис, нет HTTP-порта, не засыпает по таймауту
+    name: max-ai-bridge
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    # Render Free не даёт persistent disk для worker-сервисов,
+    # поэтому сессия MAX (cache/main.db) будет сброшена при рестарте.
+    # Решение: авторизоваться один раз локально, закоммитить cache/main.db
+    # в приватный репозиторий — или использовать платный тир с диском.
+    envVars:
+      - key: MAX_PHONE
+        sync: false       # заполняется вручную в Render Dashboard
+      - key: MAX_SESSION
+        sync: false       # base64 от cache/main.db, получить: python session.py export
+      - key: TURSO_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
+      - key: AI_PROVIDERS
+        sync: false
+      - key: TRIGGER_PREFIX
+        value: "@a "
+      - key: COMMAND_PREFIX
+        value: "!ai"
+      - key: HISTORY_CONTEXT_TURNS
+        value: "6"
+      - key: SEARCH_ENGINE
+        value: "none"
