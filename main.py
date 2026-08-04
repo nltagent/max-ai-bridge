@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import random
+import signal
+import sys
 from datetime import datetime, timezone
 
 import httpx
@@ -12,6 +14,7 @@ import config
 import provider_registry
 import websearch
 from ai_providers import ask, ask_stream
+from render_utils import start_health_server, start_keepalive_loop
 from session import restore as restore_session
 from storage import Storage
 
@@ -250,11 +253,38 @@ async def _handle(message: Message, client: Client) -> None:
 
 
 async def main() -> None:
+    health_server = None
+    keepalive_stop = None
+    stop_requested = asyncio.Event()
+
+    def _request_stop(*_args) -> None:
+        stop_requested.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, lambda *_args: _request_stop())
+        except ValueError:
+            pass
+
     try:
+        health_server = start_health_server()
+        keepalive_stop = start_keepalive_loop()
         await client.start()
+    except KeyboardInterrupt:
+        logger.info("Получен KeyboardInterrupt, завершаем работу")
     finally:
+        if keepalive_stop is not None:
+            keepalive_stop.set()
+        if health_server is not None:
+            health_server.shutdown()
+            health_server.server_close()
         await storage.close()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except SystemExit:
+        raise
+    except KeyboardInterrupt:
+        sys.exit(0)
